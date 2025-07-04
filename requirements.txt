@@ -1,0 +1,10 @@
+# Core libraries for data collection
+opencv-python==4.9.0.80
+mediapipe
+numpy==1.26.4
+
+# For model training (optional)
+scikit-learn==1.4.2
+torch==2.3.0
+torchvision==0.18.0
+torchaudio==2.3.0
