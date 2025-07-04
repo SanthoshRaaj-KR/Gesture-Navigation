@@ -1,2 +1,13 @@
 
 env
+
+# Ignore saved models or later generated files
+*.h5
+*.pt
+*.pkl
+*.onnx
+
+# Optional: Ignore backup training data
+__pycache__/
+*.zip
+models

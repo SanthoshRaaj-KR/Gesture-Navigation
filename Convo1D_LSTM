@@ -1,0 +1,81 @@
+import os
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, MaxPooling1D, LSTM, Dropout, Dense
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import ModelCheckpoint
+
+# === Configuration ===
+DATA_DIR = "dataset"
+GESTURES = ["restore_browser", "minimize_browser", "tab_left", "tab_right"]
+FRAMES_PER_SEQUENCE = 45
+FEATURES_PER_FRAME = 63
+MODEL_DIR = "models"
+EPOCHS = 30
+BATCH_SIZE = 16
+
+# === Load Dataset ===
+X, y = [], []
+
+for gesture in GESTURES:
+    folder_path = os.path.join(DATA_DIR, gesture)
+    for file in os.listdir(folder_path):
+        if file.endswith(".npy"):
+            data = np.load(os.path.join(folder_path, file))
+            if data.shape == (FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME):
+                X.append(data)
+                y.append(gesture)
+
+X = np.array(X)
+y = np.array(y)
+
+# === Encode Labels ===
+label_encoder = LabelEncoder()
+y_encoded = label_encoder.fit_transform(y)  # e.g., "tab_left" -> 2
+y_onehot = to_categorical(y_encoded, num_classes=len(GESTURES))
+
+# === Split Dataset ===
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_onehot, test_size=0.2, random_state=42, stratify=y
+)
+
+# === Build Model ===
+model = Sequential([
+    Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME)),
+    MaxPooling1D(pool_size=2),
+    Dropout(0.3),
+
+    LSTM(128),
+    Dropout(0.3),
+
+    Dense(64, activation='relu'),
+    Dense(32,activation='relu'),
+    Dense(len(GESTURES), activation='softmax')
+])
+
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+model.summary()
+
+# === Save Model to /model/ Directory ===
+os.makedirs(MODEL_DIR, exist_ok=True)
+checkpoint = ModelCheckpoint(
+    filepath=os.path.join(MODEL_DIR, "gesture_model.keras"),
+    monitor='val_accuracy',
+    save_best_only=True,
+    verbose=1
+)
+
+# === Train Model ===
+history = model.fit(
+    X_train, y_train,
+    validation_data=(X_test, y_test),
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    callbacks=[checkpoint]
+)
+
+# === Evaluate Model ===
+test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
+print(f"\n✅ Test Accuracy: {test_acc:.2f}*100")
