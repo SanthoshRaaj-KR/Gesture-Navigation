@@ -1,124 +1,134 @@
-# === gesture_predictor.py ===
-import cv2
-import numpy as np
-import mediapipe as mp
-from collections import deque
-from tensorflow.keras.models import load_model
-import pickle
-import time
-import queue
-
-# === Constants ===
-FRAMES_PER_SEQUENCE = 45
-FEATURES_PER_FRAME = 63
-MODEL_PATH = "models/gesture_model.keras"
-ENCODER_PATH = "models/label_encoder.pkl"
-
-# === Load Model and Label Encoder ===
-model = load_model(MODEL_PATH)
-with open(ENCODER_PATH, "rb") as f:
-    label_encoder = pickle.load(f)
-
-# === MediaPipe Hands Setup ===
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1)
-mp_drawing = mp.solutions.drawing_utils
-
-# === Prediction Function ===
-def start_prediction(pred_queue: queue.Queue):
-    print("🟡 Starting gesture prediction...")
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("❌ Cannot access webcam.")
-        return
-
-    print("📷 Webcam started. Press 'q' to quit.")
-    sequence = deque(maxlen=FRAMES_PER_SEQUENCE)
-    recent_preds = deque(maxlen=5)
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        image = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        result = hands.process(rgb)
-
-        if result.multi_hand_landmarks:
-            hand_landmarks = result.multi_hand_landmarks[0]
-            keypoints = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark]).flatten()
-            sequence.append(keypoints)
-            mp_drawing.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-        else:
-            sequence.append(np.zeros(FEATURES_PER_FRAME))
-
-        display_text = "Waiting..."
-
-        if len(sequence) == FRAMES_PER_SEQUENCE:
-            input_seq = np.expand_dims(sequence, axis=0)
-            prediction = model.predict(input_seq, verbose=0)[0]
-            pred_index = np.argmax(prediction)
-            confidence = prediction[pred_index]
-
-            pred_label = "no_gesture"
-            if confidence > 0.8:
-                pred_label = label_encoder.inverse_transform([pred_index])[0]
-
-            print(f"[DEBUG] Model predicted: {pred_label} ({confidence:.2f})")
-            recent_preds.append(pred_label)
-
-            if len(recent_preds) == 5 and recent_preds.count(recent_preds[0]) >= 4:
-                stable_label = recent_preds[0]
-                if stable_label != "no_gesture":
-                    pred_queue.put(stable_label)
-                    print(f"[QUEUE] Putting: {stable_label}")
-                    display_text = f"{stable_label} (stable)"
-                else:
-                    display_text = "No gesture"
-            else:
-                display_text = "Uncertain"
-
-        cv2.putText(image, display_text, (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-        cv2.imshow("🖐 Gesture Prediction", image)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
 # === gesture_actions.py ===
 import pyautogui
 import pygetwindow as gw
 import time
 import queue
-from gesture_predictor import start_prediction
 import threading
+import sys
+import os
+
+# Add error handling for imports
+try:
+    from gesture_predictor import start_prediction
+except ImportError as e:
+    print(f"[ERROR] Failed to import gesture_predictor: {e}")
+    sys.exit(1)
 
 pyautogui.FAILSAFE = False
-
+COOLDOWN_TIME = 2  # seconds
 
 def perform_action(label):
+    print(f"[DEBUG] Performing action for label: {label}")
     try:
-        windows = gw.getWindowsWithTitle("Brave")
+        # More flexible window detection
+        windows = gw.getAllWindows()
         browser_window = None
-        for w in windows:
-            if w.title.strip() != "":
-                browser_window = w
-                break
+        
+        # Look for browser windows (Brave, Chrome, Firefox, etc.)
+        browser_names = ["Brave", "Chrome", "Firefox", "Edge", "Safari"]
+        
+        for window in windows:
+            if window.title.strip() != "":  # Skip empty titles
+                for browser_name in browser_names:
+                    if browser_name.lower() in window.title.lower():
+                        browser_window = window
+                        break
+                if browser_window:
+                    break
 
         if not browser_window:
-            print("[⚠️ NO BROWSER] No 'Brave' window found.")
+            print("[⚠️ NO BROWSER] No browser window found.")
             return
+
+        print(f"[DEBUG] Found browser window: {browser_window.title}")
 
         if label == "restore_browser":
             if browser_window.isMinimized:
                 browser_window.restore()
                 time.sleep(0.3)
             browser_window.activate()
+            
         elif label == "minimize_browser":
             browser_window.minimize()
+            
         elif label == "tab_left":
             browser_window.activate()
             time.sleep(0.1)
+            pyautogui.hotkey('ctrl', 'shift', 'tab')
+            
+        elif label == "tab_right":
+            browser_window.activate()
+            time.sleep(0.1)
+            pyautogui.hotkey('ctrl', 'tab')
+            
+        print(f"[✅ SUCCESS] Action '{label}' completed")
+        
+    except Exception as e:
+        print(f"[⚠️ ACTION ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+
+def action_listener(pred_queue):
+    """Listen for predictions and execute actions"""
+    last_label = None
+    last_action_time = 0
+    
+    print("[DEBUG] Action listener started")
+    
+    while True:
+        try:
+            if not pred_queue.empty():
+                label = pred_queue.get_nowait()  # Non-blocking get
+                current_time = time.time()
+                
+                print(f"[DEBUG] Received label: {label}")
+                
+                # Add cooldown to prevent rapid repeated actions
+                if (label != last_label or 
+                    current_time - last_action_time > COOLDOWN_TIME):
+                    
+                    print(f"[🤲 Gesture] Performing: {label}")
+                    perform_action(label)
+                    last_label = label
+                    last_action_time = current_time
+                else:
+                    print(f"[DEBUG] Skipping repeated action: {label}")
+                    
+            time.sleep(0.1)  # Small delay to prevent busy waiting
+            
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"[⚠️ LISTENER ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+
+if __name__ == "__main__":
+    print("[🚀 STARTUP] Starting gesture control system...")
+    
+    try:
+        # Create queue for communication
+        prediction_queue = queue.Queue()
+        
+        # Start action listener in daemon thread
+        action_thread = threading.Thread(
+            target=action_listener, 
+            args=(prediction_queue,), 
+            daemon=True
+        )
+        action_thread.start()
+        
+        print("[✅ SUCCESS] Action listener started")
+        
+        # Start prediction (this will block)
+        print("[📷 CAMERA] Starting gesture prediction...")
+        start_prediction(prediction_queue)
+        
+    except KeyboardInterrupt:
+        print("\n[👋 SHUTDOWN] Gracefully shutting down...")
+    except Exception as e:
+        print(f"[❌ FATAL ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("[🔚 END] Program terminated")
